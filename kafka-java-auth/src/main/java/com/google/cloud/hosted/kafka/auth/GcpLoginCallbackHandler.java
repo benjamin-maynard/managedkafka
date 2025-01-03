@@ -24,11 +24,16 @@ import com.google.auth.oauth2.ExternalAccountCredentials;
 import com.google.auth.oauth2.GoogleCredentials;
 import com.google.auth.oauth2.ImpersonatedCredentials;
 import com.google.auth.oauth2.ServiceAccountCredentials;
+import com.google.auth.oauth2.UserCredentials;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import com.google.gson.Gson;
+import java.io.BufferedReader;
 import java.io.IOException;
+import java.io.InputStreamReader;
+import java.net.HttpURLConnection;
+import java.net.URL;
 import java.time.Instant;
 import java.util.Base64;
 import java.util.List;
@@ -56,6 +61,8 @@ public class GcpLoginCallbackHandler implements AuthenticateCallbackHandler {
   private static final String JWT_EXP_CLAIM = "exp";
   private static final String GOOGLE_CLOUD_PLATFORM_SCOPE =
       "https://www.googleapis.com/auth/cloud-platform";
+  private static final String GOOGLE_OAUTH_TOKEN_INFO_ENDPOINT =
+      "https://www.googleapis.com/oauth2/v3/tokeninfo?access_token=";
 
   /** A stub Google credentials class that exposes the account name. Used only for testing. */
   abstract static class StubGoogleCredentials extends GoogleCredentials {
@@ -128,6 +135,10 @@ public class GcpLoginCallbackHandler implements AuthenticateCallbackHandler {
       subject = ((ImpersonatedCredentials) credentials).getAccount();
     } else if (credentials instanceof StubGoogleCredentials) {
       subject = ((StubGoogleCredentials) credentials).getAccount();
+    } else if (credentials instanceof UserCredentials) {
+      credentials.refreshIfExpired();
+      AccessToken googleAccessToken = credentials.getAccessToken();
+      subject = getUserEmailFromToken(googleAccessToken.getTokenValue());
     } else {
       throw new IOException("Unknown credentials type: " + credentials.getClass().getName());
     }
@@ -172,7 +183,34 @@ public class GcpLoginCallbackHandler implements AuthenticateCallbackHandler {
         b64Encode(token.getTokenValue()));
   }
 
+  /**
+   * Retrieves the user's email from the Google OAuth tokeninfo API.
+   * @param accessToken The access token.
+   * @return The user's email address.
+   * @throws IOException If there is an error communicating with the tokeninfo API.
+   */
+  private static String getUserEmailFromToken(String accessToken) throws IOException {
+    URL url = new URL(GOOGLE_OAUTH_TOKEN_INFO_ENDPOINT + accessToken);
+    HttpURLConnection connection = (HttpURLConnection) url.openConnection();
+
+    try (BufferedReader reader = new BufferedReader(new InputStreamReader(connection.getInputStream()))) {
+      StringBuilder response = new StringBuilder();
+      String line;
+      while ((line = reader.readLine()) != null) {
+        response.append(line);
+      }
+
+      Map<String, Object> tokenInfo = new Gson().fromJson(response.toString(), Map.class);
+      if (tokenInfo.containsKey("email")) {
+        return (String) tokenInfo.get("email");
+      } else {
+        throw new IOException("Email not found in tokeninfo response: " + response);
+      }
+    } finally {
+      connection.disconnect();
+    }
+  }
+
   @Override
   public void close() {}
 }
-
